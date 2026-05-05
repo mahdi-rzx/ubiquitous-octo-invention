@@ -45,7 +45,7 @@ jobs:
         id: download
         continue-on-error: true
         run: |
-          timeout 180 wget \
+          timeout 1800 wget \
             --recursive \
             --level=inf \
             --no-clobber \
