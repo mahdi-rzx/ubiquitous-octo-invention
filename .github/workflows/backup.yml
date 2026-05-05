@@ -1,117 +1,134 @@
-name: 🧪 Chemistry Library Offline Backup
+name: 🌐 Resumable Chemistry Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      split_size:
-        description: 'Split size for ZIP parts (e.g., 90M, 200M)'
-        required: false
-        default: '90M'
-      wait_time:
-        description: 'Delay between requests (seconds)'
-        required: false
-        default: '0.5'
-  
+      book:
+        description: 'Chemistry book to download'
+        required: true
+        type: choice
+        options:
+          - organic
+          - inorganic
+          - physical
+          - analytical
+          - general
+          - ALL
+        default: 'ALL'
   schedule:
-    - cron: '0 0 1 * *'  # Monthly auto-backup
+    - cron: '*/50 * * * *'  # Every 50 minutes
+
+permissions:
+  contents: write
 
 jobs:
-  backup:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
-
+    timeout-minutes: 45  # Stop before next trigger
+    
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        
+      - name: Install wget
+        run: sudo apt-get update && sudo apt-get install -y wget
 
-      - name: 🛠️ Install tools
-        run: sudo apt-get update && sudo apt-get install -y wget zip
-
-      - name: 🌍 Download Chemistry Textbooks
+      - name: Download with resume
         run: |
-          mkdir -p chemistry-library
-          
-          # Define all chemistry branches
+          # Define books
           declare -A BOOKS=(
             ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
             ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
-            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
             ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
+            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
             ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
-            ["biochemistry"]="https://chem.libretexts.org/Bookshelves/Biochemistry/"
           )
           
-          # Download each book into its own folder
-          for branch in "${!BOOKS[@]}"; do
-            echo "📚 Downloading: $branch chemistry..."
-            wget \
+          TARGET="${{ github.event.inputs.book || 'ALL' }}"
+          mkdir -p textbooks progress
+          
+          for book in "${!BOOKS[@]}"; do
+            # Skip if not ALL and not this book
+            if [ "$TARGET" != "ALL" ] && [ "$TARGET" != "$book" ]; then
+              continue
+            fi
+            
+            url="${BOOKS[$book]}"
+            dir="textbooks/${book}"
+            progress_file="progress/${book}.txt"
+            
+            # Get previous count
+            if [ -f "$progress_file" ]; then
+              prev=$(cat "$progress_file")
+            else
+              prev=0
+            fi
+            
+            echo ""
+            echo "========================================="
+            echo "📚 $book"
+            echo "   Previous files: $prev"
+            echo "   Current size: $(du -sh $dir 2>/dev/null | cut -f1 || echo 0)"
+            echo "========================================="
+            
+            # Download with no-clobber (skip existing) - 42 minute timeout
+            timeout 2520 wget \
               --mirror \
               --convert-links \
               --adjust-extension \
               --page-requisites \
               --no-parent \
-              --wait=${{ github.event.inputs.wait_time }} \
+              --wait=0.5 \
+              --random-wait \
               --level=inf \
-              --accept-regex "${BOOKS[$branch]}.*" \
-              --reject-regex '(\.pdf$|\.PDF$|download|\.zip$)' \
-              --directory-prefix="./chemistry-library/$branch" \
+              --no-clobber \
+              --directory-prefix="$dir" \
               --no-verbose \
-              ${BOOKS[$branch]} || echo "⚠️ Some $branch pages failed"
+              --timeout=15 \
+              --tries=2 \
+              "$url" 2>&1 | grep -E "(saved|URL:)" | tail -100 || true
+            
+            # Update progress
+            new=$(find "$dir" -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
+            echo "$new" > "$progress_file"
+            diff=$((new - prev))
+            echo "  ✅ +$diff new files"
+            echo "  📊 Total: $new files"
+            echo "  💾 Size: $(du -sh $dir 2>/dev/null | cut -f1)"
+            echo ""
           done
-          
-          echo "📊 Download complete! Size per branch:"
-          du -sh chemistry-library/*/
 
-      - name: 📦 Create ZIP archives (split)
+      - name: Show combined status
         run: |
-          SPLIT="${{ github.event.inputs.split_size }}"
-          DATE_TAG=$(date +%Y-%m-%d)
-          
-          mkdir -p archives
-          
-          # Option 1: One big chemistry library ZIP
-          echo "Creating complete chemistry library archive..."
-          cd chemistry-library
-          zip -r -s "$SPLIT" "../archives/chemistry-library-${DATE_TAG}.zip" .
-          cd ..
-          
-          echo "📊 Archives created:"
-          ls -lh archives/
-          
-          # Calculate total size
-          echo "Total archive size:"
-          du -sh archives/
+          echo ""
+          echo "========================================="
+          echo "📊 OVERALL PROGRESS"
+          echo "========================================="
+          total=0
+          for book in organic inorganic physical analytical general; do
+            count=$(cat progress/${book}.txt 2>/dev/null || echo 0)
+            size=$(du -sh textbooks/${book} 2>/dev/null | cut -f1 || echo 0)
+            printf "  %-15s %6s files  %8s\n" "$book" "$count" "$size"
+            total=$((total + count))
+          done
+          echo "  -------------------------------------"
+          printf "  %-15s %6s files  %8s\n" "TOTAL" "$total" "$(du -sh textbooks 2>/dev/null | cut -f1)"
+          echo "========================================="
 
-      - name: 🚀 Commit and push to repository
+      - name: Commit and push
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Move archives to backups folder
-          mkdir -p backups
-          mv archives/* backups/
+          git add textbooks/ progress/ 2>/dev/null
           
-          # Remove old backups (keep only latest 2)
-          ls -t backups/chemistry-library-* | tail -n +3 | xargs -r rm
-          
-          git add backups/
-          git commit -m "🧪 Update chemistry library backup ($(date +%Y-%m-%d))" || echo "No changes"
-          git push
+          if git diff --staged --quiet; then
+            echo "No new files to commit"
+          else
+            total=$(find textbooks -name "*.html" -o -name "*.htm" | wc -l)
+            added=$(git diff --staged --name-only | wc -l)
+            git commit -m "📚 +$added files | Total: $total pages | $(date +%H:%M)"
+            git push || echo "Push failed, will retry next run"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 📊 Summary
-        run: |
-          echo "✅ Chemistry Library Backup Complete!"
-          echo "📚 Books included:"
-          echo "  • Organic Chemistry"
-          echo "  • Inorganic Chemistry"  
-          echo "  • Analytical Chemistry"
-          echo "  • Physical & Theoretical Chemistry"
-          echo "  • General Chemistry"
-          echo "  • Biochemistry"
-          echo ""
-          echo "📦 Total size:"
-          du -sh backups/
