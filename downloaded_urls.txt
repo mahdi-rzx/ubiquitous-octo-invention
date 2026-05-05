@@ -82,6 +82,7 @@ https://chem.libretexts.org/Courses/can
 https://chem.libretexts.org/Special:Userlogin
 https://chem.libretexts.org/Special:Userlogin?readerView
 https://chem.libretexts.org/Special:Userlogin?returntotitle=
+https://chem.libretexts.org/Special:Userlogin?returntotitle=&returnquery=downloadfull%3D
 https://chem.libretexts.org/Special:Userlogin?returntotitle=Courses
 https://chem.libretexts.org/robots.txt
 https://files.mtstatic.com/site_4334/129656/0?Expires=1777981799&Signature=j3V-xty6wPztBGaH~rJpF5J7ntA6bCaKAyunwMEHeLovMqeoErcWE6ijgVBmH3eQhgSl5fCaLCM9hW194EwbZCRgzpOcPK-6A5IQ2mC00C3~m4ei-e4R0M3N0H4UPHGwR1D2y1YkJhrD77-NiX8Qrl8DIgsAhOJ4MEjxqWqXjPg_&Key-Pair-Id=APKAJ5Y6AV4GI7A555NA
