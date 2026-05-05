@@ -3,7 +3,7 @@ name: Download Chemistry Textbooks
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'  # Run every 4 hours to continue downloading
+    - cron: '0 */2 * * *'
 
 permissions:
   contents: write
@@ -11,130 +11,185 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 55  # Stay under 60 min limit
+    timeout-minutes: 55
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Install wget
-        run: sudo apt-get update && sudo apt-get install -y wget
-
-      - name: Download books with progress tracking
+      - name: Install tools
         run: |
-          # Define books to download
-          declare -A BOOKS=(
-            ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
-            ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
-            ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
-            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
-            ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
-          )
+          sudo apt-get update
+          sudo apt-get install -y wget
+          pip3 install beautifulsoup4 requests
+
+      - name: Download with Python crawler
+        run: |
+          python3 << 'PYEOF'
+          import requests
+          from bs4 import BeautifulSoup
+          import os, time, json
+          from urllib.parse import urljoin, urlparse
           
-          mkdir -p progress
+          BOOKS = {
+              "organic": "https://chem.libretexts.org/Bookshelves/Organic_Chemistry",
+              "inorganic": "https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry",
+              "physical": "https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry",
+              "analytical": "https://chem.libretexts.org/Bookshelves/Analytical_Chemistry",
+              "general": "https://chem.libretexts.org/Bookshelves/General_Chemistry",
+          }
           
-          for book in "${!BOOKS[@]}"; do
-            url="${BOOKS[$book]}"
-            progress_file="progress/${book}.txt"
-            download_dir="textbooks/${book}"
-            
-            # Initialize progress file if not exists
-            if [ ! -f "$progress_file" ]; then
-              echo "0" > "$progress_file"
-              echo "NEW: Starting $book"
-            fi
-            
-            LAST_COUNT=$(cat "$progress_file")
-            echo "Book: $book | Previously downloaded: $LAST_COUNT files | Dir: $download_dir"
-            
-            # Download with resume capability
-            wget \
-              --mirror \
-              --convert-links \
-              --adjust-extension \
-              --page-requisites \
-              --no-parent \
-              --wait=0.5 \
-              --random-wait \
-              --level=inf \
-              --no-clobber \
-              --directory-prefix="$download_dir" \
-              --no-verbose \
-              --timeout=30 \
-              --tries=3 \
-              "$url" 2>&1 | grep -E "(saved|URL:|ERROR)" || true
-            
-            # Count downloaded files
-            NEW_COUNT=$(find "$download_dir" -name "*.html" -o -name "*.htm" | wc -l)
-            echo "$NEW_COUNT" > "$progress_file"
-            
-            # Show progress
-            FILES_DOWNLOADED=$((NEW_COUNT - LAST_COUNT))
-            echo "  ✓ Downloaded $FILES_DOWNLOADED new files"
-            echo "  📊 Total: $NEW_COUNT files"
-            echo "  💾 Size: $(du -sh "$download_dir" 2>/dev/null | cut -f1)"
-            echo ""
-          done
+          HEADERS = {
+              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+          }
           
-          # Check if any book still needs downloading
+          MAX_PAGES_PER_RUN = 200  # Limit per book per run
+          os.makedirs('progress', exist_ok=True)
+          
+          for book_name, base_url in BOOKS.items():
+              print(f"\n{'='*60}")
+              print(f"📚 {book_name.upper()}")
+              print(f"{'='*60}")
+              
+              # Load progress
+              progress_file = f'progress/{book_name}.json'
+              if os.path.exists(progress_file):
+                  with open(progress_file) as f:
+                      state = json.load(f)
+                  visited = set(state.get('visited', []))
+                  queued = state.get('queued', [])
+                  page_count = state.get('count', 0)
+              else:
+                  visited = set()
+                  queued = [(base_url, 'index.html')]
+                  page_count = 0
+              
+              print(f"Previously downloaded: {page_count} pages")
+              print(f"Queued URLs: {len(queued)}")
+              
+              download_dir = f'textbooks/{book_name}'
+              os.makedirs(download_dir, exist_ok=True)
+              
+              downloaded_this_run = 0
+              
+              while queued and downloaded_this_run < MAX_PAGES_PER_RUN:
+                  url, filename = queued.pop(0)
+                  
+                  if url in visited:
+                      continue
+                  
+                  try:
+                      resp = requests.get(url, headers=HEADERS, timeout=15)
+                      
+                      if resp.status_code != 200:
+                          visited.add(url)
+                          continue
+                      
+                      # Check if it's actually HTML
+                      content_type = resp.headers.get('content-type', '')
+                      if 'text/html' not in content_type:
+                          visited.add(url)
+                          continue
+                      
+                      visited.add(url)
+                      
+                      # Save the page
+                      safe_name = filename.replace('/', '_').replace(':', '_')[:200]
+                      if not safe_name.endswith('.html'):
+                          safe_name += '.html'
+                      
+                      filepath = os.path.join(download_dir, safe_name)
+                      with open(filepath, 'w', encoding='utf-8') as f:
+                          f.write(resp.text)
+                      
+                      page_count += 1
+                      downloaded_this_run += 1
+                      
+                      # Parse for more links
+                      soup = BeautifulSoup(resp.text, 'html.parser')
+                      
+                      # Find the book's table of contents / navigation
+                      links_found = 0
+                      for link in soup.find_all('a', href=True):
+                          href = link['href']
+                          full_url = urljoin(url, href)
+                          parsed = urlparse(full_url)
+                          
+                          # Only follow links within the same book
+                          if base_url in full_url and full_url not in visited:
+                              # Create short filename from URL path
+                              path = parsed.path.strip('/')
+                              link_name = path.replace('/', '_') if path else f'page_{len(visited)}'
+                              
+                              if (full_url, link_name) not in queued:
+                                  queued.append((full_url, link_name))
+                                  links_found += 1
+                      
+                      if downloaded_this_run % 10 == 0:
+                          print(f"  [{page_count}] {url[:80]}... ({links_found} new links)")
+                      
+                      time.sleep(0.3)  # Be polite
+                      
+                  except Exception as e:
+                      print(f"  ✗ Error: {e}")
+                      visited.add(url)
+                      continue
+              
+              # Save progress
+              state = {
+                  'count': page_count,
+                  'visited': list(visited),
+                  'queued': queued
+              }
+              with open(progress_file, 'w') as f:
+                  json.dump(state, f)
+              
+              print(f"\n  ✅ Downloaded {downloaded_this_run} new pages this run")
+              print(f"  📊 Total: {page_count} pages")
+              print(f"  ⏳ Remaining in queue: {len(queued)}")
+              
+              # Get directory size
+              total_size = 0
+              for f in os.listdir(download_dir):
+                  total_size += os.path.getsize(os.path.join(download_dir, f))
+              print(f"  💾 Size: {total_size / 1024 / 1024:.1f} MB")
+          
+          print(f"\n{'='*60}")
+          print("🏁 RUN COMPLETE")
+          print(f"{'='*60}")
+          PYEOF
+
+      - name: Show download summary
+        run: |
           echo "========================================="
           echo "DOWNLOAD STATUS"
           echo "========================================="
-          NEEDS_MORE=false
-          for book in "${!BOOKS[@]}"; do
-            count=$(cat "progress/${book}.txt" 2>/dev/null || echo 0)
-            size=$(du -sh "textbooks/${book}" 2>/dev/null | cut -f1 || echo "0")
-            echo "  $book: $count files, $size"
-            
-            if [ "$count" -lt 100 ]; then
-              NEEDS_MORE=true
+          for book in organic inorganic physical analytical general; do
+            if [ -f "progress/${book}.json" ]; then
+              count=$(python3 -c "import json; print(json.load(open('progress/${book}.json'))['count'])")
+              queued=$(python3 -c "import json; print(len(json.load(open('progress/${book}.json'))['queued']))")
+              size=$(du -sh "textbooks/${book}" 2>/dev/null | cut -f1)
+              echo "📚 $book: $count pages, $queued queued, $size"
+            else
+              echo "📚 $book: Not started"
             fi
           done
-          
-          if [ "$NEEDS_MORE" = true ]; then
-            echo ""
-            echo "⚠️ Some books still need more downloading. Will continue on next run."
-          else
-            echo ""
-            echo "✅ All books have 100+ files!"
-          fi
+          echo ""
+          echo "Total HTML files: $(find textbooks -name '*.html' | wc -l)"
+          echo "Total size: $(du -sh textbooks 2>/dev/null | cut -f1)"
 
-      - name: Commit progress and downloaded files
+      - name: Commit progress
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Add progress files
-          mkdir -p progress
-          git add progress/
+          git add progress/ textbooks/
           
-          # Add downloaded textbooks
-          git add textbooks/ || echo "No new files to add"
-          
-          # Only commit if there are changes
           if git diff --staged --quiet; then
-            echo "No changes to commit"
+            echo "No changes"
           else
-            git commit -m "📚 Download progress update ($(date +%H:%M))"
+            git commit -m "📚 Download progress: $(find textbooks -name '*.html' | wc -l) total pages"
             git push
-            echo "✅ Changes pushed!"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Show summary
-        run: |
-          echo "========================================="
-          echo "DOWNLOAD SUMMARY"
-          echo "========================================="
-          echo ""
-          for book in organic inorganic physical analytical general; do
-            count=$(cat progress/${book}.txt 2>/dev/null || echo 0)
-            size=$(du -sh textbooks/${book} 2>/dev/null | cut -f1 || echo "0")
-            echo "📚 $book: $count pages, $size"
-          done
-          echo ""
-          echo "Total pages: $(find textbooks -name '*.html' -o -name '*.htm' | wc -l)"
-          echo "Total size: $(du -sh textbooks 2>/dev/null | cut -f1)"
-          echo ""
-          echo "⏰ Next auto-run in 4 hours (or trigger manually anytime)"
