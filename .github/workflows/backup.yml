@@ -1,86 +1,140 @@
-name: 🌐 Website Offline Backup
+name: Download Chemistry Textbooks
 
 on:
   workflow_dispatch:
-    inputs:
-      site_url:
-        description: 'URL of the website to mirror'
-        required: true
-        default: 'https://chem.libretexts.org/'
-      depth:
-        description: 'Maximum recursion depth (1 = homepage, 5 = deep)'
-        required: false
-        default: '3'
-      wait:
-        description: 'Delay between requests (seconds)'
-        required: false
-        default: '0.5'
-      output_name:
-        description: 'Base name for the backup (without .zip)'
-        required: false
-        default: 'offline-backup'
-      split_size:
-        description: 'Split size (e.g., 90M, 2G, 500M). Leave blank for no split.'
-        required: false
-        default: '90M'
+  schedule:
+    - cron: '0 */4 * * *'  # Run every 4 hours to continue downloading
+
+permissions:
+  contents: write
 
 jobs:
-  backup:
+  download:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    timeout-minutes: 55  # Stay under 60 min limit
+    
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        
+      - name: Install wget
+        run: sudo apt-get update && sudo apt-get install -y wget
 
-      - name: 🛠️ Install tools
-        run: sudo apt-get update && sudo apt-get install -y wget zip
-
-      - name: 🌍 Mirror website with wget
+      - name: Download books with progress tracking
         run: |
-          mkdir -p mirror_output
-          wget \
-            --mirror \
-            --convert-links \
-            --adjust-extension \
-            --page-requisites \
-            --no-parent \
-            --wait=${{ github.event.inputs.wait }} \
-            --level=${{ github.event.inputs.depth }} \
-            --directory-prefix=./mirror_output \
-            --no-verbose \
-            ${{ github.event.inputs.site_url }}
-          du -sh mirror_output/
-
-      - name: 📦 Create ZIP archive (with optional split)
-        run: |
-          BASE_NAME="${{ github.event.inputs.output_name }}"
-          SPLIT_SIZE="${{ github.event.inputs.split_size }}"
-          cd mirror_output
-
-          if [ -n "$SPLIT_SIZE" ]; then
-            # Create split zip: parts named BASE_NAME.zip, BASE_NAME.z01, BASE_NAME.z02, ...
-            zip -r -s "$SPLIT_SIZE" ../"$BASE_NAME.zip" .
-            echo "Created split archives:"
-            ls -lh ../${BASE_NAME}.* 2>/dev/null || true
+          # Define books to download
+          declare -A BOOKS=(
+            ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
+            ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
+            ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
+            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
+            ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
+          )
+          
+          mkdir -p progress
+          
+          for book in "${!BOOKS[@]}"; do
+            url="${BOOKS[$book]}"
+            progress_file="progress/${book}.txt"
+            download_dir="textbooks/${book}"
+            
+            # Initialize progress file if not exists
+            if [ ! -f "$progress_file" ]; then
+              echo "0" > "$progress_file"
+              echo "NEW: Starting $book"
+            fi
+            
+            LAST_COUNT=$(cat "$progress_file")
+            echo "Book: $book | Previously downloaded: $LAST_COUNT files | Dir: $download_dir"
+            
+            # Download with resume capability
+            wget \
+              --mirror \
+              --convert-links \
+              --adjust-extension \
+              --page-requisites \
+              --no-parent \
+              --wait=0.5 \
+              --random-wait \
+              --level=inf \
+              --no-clobber \
+              --directory-prefix="$download_dir" \
+              --no-verbose \
+              --timeout=30 \
+              --tries=3 \
+              "$url" 2>&1 | grep -E "(saved|URL:|ERROR)" || true
+            
+            # Count downloaded files
+            NEW_COUNT=$(find "$download_dir" -name "*.html" -o -name "*.htm" | wc -l)
+            echo "$NEW_COUNT" > "$progress_file"
+            
+            # Show progress
+            FILES_DOWNLOADED=$((NEW_COUNT - LAST_COUNT))
+            echo "  ✓ Downloaded $FILES_DOWNLOADED new files"
+            echo "  📊 Total: $NEW_COUNT files"
+            echo "  💾 Size: $(du -sh "$download_dir" 2>/dev/null | cut -f1)"
+            echo ""
+          done
+          
+          # Check if any book still needs downloading
+          echo "========================================="
+          echo "DOWNLOAD STATUS"
+          echo "========================================="
+          NEEDS_MORE=false
+          for book in "${!BOOKS[@]}"; do
+            count=$(cat "progress/${book}.txt" 2>/dev/null || echo 0)
+            size=$(du -sh "textbooks/${book}" 2>/dev/null | cut -f1 || echo "0")
+            echo "  $book: $count files, $size"
+            
+            if [ "$count" -lt 100 ]; then
+              NEEDS_MORE=true
+            fi
+          done
+          
+          if [ "$NEEDS_MORE" = true ]; then
+            echo ""
+            echo "⚠️ Some books still need more downloading. Will continue on next run."
           else
-            # No split – single zip
-            zip -r ../"$BASE_NAME.zip" .
-            echo "Created single archive:"
-            ls -lh ../"$BASE_NAME.zip"
+            echo ""
+            echo "✅ All books have 100+ files!"
           fi
 
-      - name: 🚀 Push backup parts to repository
+      - name: Commit progress and downloaded files
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          mkdir -p backups
-          # Move all parts (or single zip)
-          mv ../${{ github.event.inputs.output_name }}.* backups/ 2>/dev/null || mv ../${{ github.event.inputs.output_name }}.zip backups/
+          # Add progress files
+          mkdir -p progress
+          git add progress/
           
-          git add backups/
-          git commit -m "📦 Backup of ${{ github.event.inputs.site_url }}" || echo "No changes to commit"
-          git push
+          # Add downloaded textbooks
+          git add textbooks/ || echo "No new files to add"
+          
+          # Only commit if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "📚 Download progress update ($(date +%H:%M))"
+            git push
+            echo "✅ Changes pushed!"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Show summary
+        run: |
+          echo "========================================="
+          echo "DOWNLOAD SUMMARY"
+          echo "========================================="
+          echo ""
+          for book in organic inorganic physical analytical general; do
+            count=$(cat progress/${book}.txt 2>/dev/null || echo 0)
+            size=$(du -sh textbooks/${book} 2>/dev/null | cut -f1 || echo "0")
+            echo "📚 $book: $count pages, $size"
+          done
+          echo ""
+          echo "Total pages: $(find textbooks -name '*.html' -o -name '*.htm' | wc -l)"
+          echo "Total size: $(du -sh textbooks 2>/dev/null | cut -f1)"
+          echo ""
+          echo "⏰ Next auto-run in 4 hours (or trigger manually anytime)"
