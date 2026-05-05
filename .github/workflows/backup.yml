@@ -1,136 +1,86 @@
-name: 🌐 Resumable Chemistry Downloader
+name: 🌐 Website Offline Backup
 
 on:
   workflow_dispatch:
     inputs:
-      book:
-        description: 'Chemistry book to download'
+      site_url:
+        description: 'URL of the website to mirror'
         required: true
-        type: choice
-        options:
-          - organic
-          - inorganic
-          - physical
-          - analytical
-          - general
-          - ALL
-        default: 'ALL'
-  schedule:
-    - cron: '*/50 * * * *'
-
-permissions:
-  contents: write
+        default: 'https://chem.libretexts.org/'
+      depth:
+        description: 'Maximum recursion depth (1 = homepage, 5 = deep)'
+        required: false
+        default: '3'
+      wait:
+        description: 'Delay between requests (seconds)'
+        required: false
+        default: '0.5'
+      output_name:
+        description: 'Base name for the backup (without .zip)'
+        required: false
+        default: 'offline-backup'
+      split_size:
+        description: 'Split size (e.g., 90M, 2G, 500M). Leave blank for no split.'
+        required: false
+        default: '90M'
 
 jobs:
-  download:
+  backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    
+    timeout-minutes: 60
+
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y wget
+      - name: 🛠️ Install tools
+        run: sudo apt-get update && sudo apt-get install -y wget zip
 
-      - name: Download with resume
+      - name: 🌍 Mirror website with wget
         run: |
-          declare -A BOOKS=(
-            ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
-            ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
-            ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
-            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
-            ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
-          )
-          
-          TARGET="${{ github.event.inputs.book || 'ALL' }}"
-          mkdir -p mirror_output progress
-          
-          for book in "${!BOOKS[@]}"; do
-            if [ "$TARGET" != "ALL" ] && [ "$TARGET" != "$book" ]; then
-              continue
-            fi
-            
-            url="${BOOKS[$book]}"
-            dir="mirror_output/${book}"
-            progress_file="progress/${book}.txt"
-            
-            # Get previous count
-            prev=$(cat "$progress_file" 2>/dev/null || echo 0)
-            
-            echo ""
-            echo "========================================="
-            echo "📚 $book"
-            echo "   URL: $url"
-            echo "   Previous files: $prev"
-            echo "========================================="
-            
-            timeout 2520 wget \
-              --mirror \
-              --convert-links \
-              --adjust-extension \
-              --page-requisites \
-              --no-parent \
-              --wait=0.5 \
-              --random-wait \
-              --level=inf \
-              --no-clobber \
-              --directory-prefix="./$dir" \
-              --no-verbose \
-              --timeout=15 \
-              --tries=2 \
-              "$url" 2>&1 | tail -30 || true
-            
-            # Count all HTML files
-            new=$(find "$dir" -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
-            echo "$new" > "$progress_file"
-            
-            diff=$((new - prev))
-            size=$(du -sh "$dir" 2>/dev/null | cut -f1 || echo 0)
-            
-            echo "  ✅ +$diff new | Total: $new files | Size: $size"
-            
-            # Show directory tree if no files downloaded
-            if [ "$new" -le 1 ]; then
-              echo "  🔍 Directory structure:"
-              find "$dir" -type d 2>/dev/null | head -10
-              echo "  📄 Files found:"
-              find "$dir" -type f 2>/dev/null | head -10
-            fi
-          done
+          mkdir -p mirror_output
+          wget \
+            --mirror \
+            --convert-links \
+            --adjust-extension \
+            --page-requisites \
+            --no-parent \
+            --wait=${{ github.event.inputs.wait }} \
+            --level=${{ github.event.inputs.depth }} \
+            --directory-prefix=./mirror_output \
+            --no-verbose \
+            ${{ github.event.inputs.site_url }}
+          du -sh mirror_output/
 
-      - name: Show overall progress
+      - name: 📦 Create ZIP archive (with optional split)
         run: |
-          echo ""
-          echo "========================================="
-          echo "📊 OVERALL PROGRESS"
-          echo "========================================="
-          total=0
-          for book in organic inorganic physical analytical general; do
-            count=$(cat progress/${book}.txt 2>/dev/null || echo 0)
-            size=$(du -sh mirror_output/${book} 2>/dev/null | cut -f1 || echo 0)
-            printf "  %-15s %6s files  %8s\n" "$book" "$count" "$size"
-            total=$((total + count))
-          done
-          echo "  -------------------------------------"
-          printf "  %-15s %6s files  %8s\n" "TOTAL" "$total" "$(du -sh mirror_output 2>/dev/null | cut -f1)"
-          echo "========================================="
+          BASE_NAME="${{ github.event.inputs.output_name }}"
+          SPLIT_SIZE="${{ github.event.inputs.split_size }}"
+          cd mirror_output
 
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          git add mirror_output/ progress/ 2>/dev/null
-          
-          if git diff --staged --quiet; then
-            echo "No new files"
+          if [ -n "$SPLIT_SIZE" ]; then
+            # Create split zip: parts named BASE_NAME.zip, BASE_NAME.z01, BASE_NAME.z02, ...
+            zip -r -s "$SPLIT_SIZE" ../"$BASE_NAME.zip" .
+            echo "Created split archives:"
+            ls -lh ../${BASE_NAME}.* 2>/dev/null || true
           else
-            total=$(find mirror_output -name "*.html" -o -name "*.htm" | wc -l)
-            git commit -m "📚 $total pages | $(date +%H:%M)"
-            git push
+            # No split – single zip
+            zip -r ../"$BASE_NAME.zip" .
+            echo "Created single archive:"
+            ls -lh ../"$BASE_NAME.zip"
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🚀 Push backup parts to repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          mkdir -p backups
+          # Move all parts (or single zip)
+          mv ../${{ github.event.inputs.output_name }}.* backups/ 2>/dev/null || mv ../${{ github.event.inputs.output_name }}.zip backups/
+          
+          git add backups/
+          git commit -m "📦 Backup of ${{ github.event.inputs.site_url }}" || echo "No changes to commit"
+          git push
