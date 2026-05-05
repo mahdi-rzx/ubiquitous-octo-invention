@@ -23,47 +23,29 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # -----------------------------------------------------------------------
-      # Build a file containing ONLY new URLs (not yet downloaded)
-      # -----------------------------------------------------------------------
-      - name: Build list of URLs still to download
-        id: prepare
+      # ---------------------------------------------------------------
+      # Determine starting URLs
+      # ---------------------------------------------------------------
+      - name: Set starting URLs
+        id: start_urls
         run: |
-          # Start from the homepage
-          echo "https://chem.libretexts.org/" > urls_to_crawl.txt
-
-          # If we have a record of previously downloaded URLs, remove them
-          if [ -f downloaded_urls.txt ] && [ -s downloaded_urls.txt ]; then
-            echo "Previously downloaded: $(wc -l < downloaded_urls.txt) URLs"
-
-            # Create a temporary file with all crawled URLs (start with the seed)
-            # This constantly-updated file will be compared against the exclusion list
+          if [ -f resume_urls.txt ] && [ -s resume_urls.txt ]; then
+            echo "📌 Resuming from $(wc -l < resume_urls.txt) entry points"
+            # Copy resume URLs as our seed list
+            cp resume_urls.txt seed_urls.txt
           else
-            echo "No previous progress found – starting fresh."
-            touch downloaded_urls.txt
+            echo "🆕 Starting fresh from homepage"
+            echo "https://chem.libretexts.org/" > seed_urls.txt
           fi
 
-      # -----------------------------------------------------------------------
-      # Download ONLY new URLs for exactly 30 minutes
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # Download for 30 minutes, resuming from saved entry points
+      # ---------------------------------------------------------------
       - name: Download for 30 minutes
         id: download
         continue-on-error: true
         run: |
-          # The strategy:
-          # 1. Let wget discover all URLs recursively (--spider mode without downloading bodies)
-          # 2. Filter out already-downloaded URLs
-          # 3. Download only the remaining new URLs
-          #
-          # But since we can't easily filter wget's internal queue,
-          # we use a different approach:
-          #
-          # Run wget normally with --no-clobber.
-          # Files already on disk will be SKIPPED (not re-downloaded).
-          # wget will spider through them to discover new URLs, but won't fetch the bodies.
-          # This is efficient because wget checks the local file FIRST.
-
-          timeout 180 wget \
+          timeout 1800 wget \
             --recursive \
             --level=inf \
             --no-clobber \
@@ -79,51 +61,71 @@ jobs:
             --directory-prefix=archive \
             --output-file=wget.log \
             --no-verbose \
-            https://chem.libretexts.org/
+            --input-file=seed_urls.txt
 
           echo "wget finished with exit code: $?"
 
-      # -----------------------------------------------------------------------
-      # Update the master list of downloaded URLs
-      # -----------------------------------------------------------------------
-      - name: Update downloaded URLs master list
+      # ---------------------------------------------------------------
+      # Extract newly downloaded URLs from this run
+      # ---------------------------------------------------------------
+      - name: Extract new URLs
         if: always()
         run: |
-          # Extract all successfully-downloaded URLs from this run's log
-          # Format: "URL:http://... [size] -> localfile"
           grep -P 'URL:https?://[^ ]+' wget.log | \
             grep -oP 'URL:\K[^ ]+' | \
             sort -u > this_run_urls.txt
 
-          echo "URLs fetched this run: $(wc -l < this_run_urls.txt)"
+          echo "📊 URLs downloaded this run: $(wc -l < this_run_urls.txt)"
 
-          # Merge with existing master list and deduplicate
-          if [ -f downloaded_urls.txt ]; then
-            cat downloaded_urls.txt this_run_urls.txt | sort -u > merged_urls.txt
-            mv merged_urls.txt downloaded_urls.txt
+      # ---------------------------------------------------------------
+      # Save the LAST 100 downloaded URLs as resume points
+      # These are the deepest pages reached in this run
+      # ---------------------------------------------------------------
+      - name: Save resume points
+        if: always()
+        run: |
+          if [ -s this_run_urls.txt ]; then
+            # Take the last 100 URLs (deepest crawled pages) as next entry points
+            # Exclude homepage and top-level pages to avoid re-crawling from the top
+            tail -100 this_run_urls.txt | \
+              grep -v 'chem.libretexts.org/index.html' | \
+              grep -v 'chem.libretexts.org/robots.txt' | \
+              grep -v 'chem.libretexts.org/@api' | \
+              grep -v 'Special:' \
+              > resume_urls.txt
+
+            echo "🔖 Saved $(wc -l < resume_urls.txt) resume points for next run"
+            echo "   Sample: $(head -3 resume_urls.txt)"
           else
-            mv this_run_urls.txt downloaded_urls.txt
+            echo "⚠️ No new URLs downloaded this run"
+          fi
+
+          # Also maintain the master list of all downloaded URLs
+          if [ -f downloaded_urls.txt ]; then
+            cat downloaded_urls.txt this_run_urls.txt | sort -u > merged.txt
+            mv merged.txt downloaded_urls.txt
+          else
+            cp this_run_urls.txt downloaded_urls.txt
           fi
 
           rm -f this_run_urls.txt
 
-          echo "Total unique URLs archived so far: $(wc -l < downloaded_urls.txt)"
-          echo "Total files on disk: $(find archive/ -type f | wc -l)"
+          echo "📦 Total unique URLs archived: $(wc -l < downloaded_urls.txt)"
+          echo "📁 Total files on disk: $(find archive/ -type f | wc -l)"
 
-      # -----------------------------------------------------------------------
-      # Commit and push everything
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------
+      # Commit and push
+      # ---------------------------------------------------------------
       - name: Commit and push progress
         if: always()
         run: |
-          git add archive/ wget.log downloaded_urls.txt
+          git add archive/ wget.log downloaded_urls.txt resume_urls.txt seed_urls.txt
           if git diff --cached --quiet; then
-            echo "No changes to commit – archive is up to date."
+            echo "No changes to commit."
           else
-            # Create a meaningful commit message
-            TOTAL_URLS=$(wc -l < downloaded_urls.txt)
-            TOTAL_FILES=$(find archive/ -type f | wc -l)
-            git commit -m "📥 Checkpoint: ${TOTAL_URLS} URLs / ${TOTAL_FILES} files — $(date -u +'%Y-%m-%d %H:%M UTC')"
+            TOTAL=$(wc -l < downloaded_urls.txt 2>/dev/null || echo 0)
+            FILES=$(find archive/ -type f | wc -l)
+            git commit -m "📥 ${TOTAL} URLs / ${FILES} files — $(date -u +'%Y-%m-%d %H:%M UTC')"
             git push
-            echo "✅ Successfully pushed archive progress to repository."
+            echo "✅ Pushed successfully."
           fi
