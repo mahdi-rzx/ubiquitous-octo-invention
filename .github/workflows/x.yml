@@ -39,7 +39,6 @@ jobs:
         continue-on-error: true   
         run: |
           # Start the mirror in the background, limited to 5.5 hours (19800 s)
-          timeout 19800 wget \
             --mirror \
             --convert-links \
             --adjust-extension \
