@@ -16,7 +16,7 @@ on:
           - ALL
         default: 'ALL'
   schedule:
-    - cron: '*/50 * * * *'  # Every 50 minutes
+    - cron: '*/50 * * * *'
 
 permissions:
   contents: write
@@ -24,7 +24,7 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 45  # Stop before next trigger
+    timeout-minutes: 45
     
     steps:
       - name: Checkout repository
@@ -33,9 +33,8 @@ jobs:
       - name: Install wget
         run: sudo apt-get update && sudo apt-get install -y wget
 
-      - name: Download with resume
+      - name: Download with proper recursion
         run: |
-          # Define books
           declare -A BOOKS=(
             ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
             ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
@@ -48,7 +47,6 @@ jobs:
           mkdir -p textbooks progress
           
           for book in "${!BOOKS[@]}"; do
-            # Skip if not ALL and not this book
             if [ "$TARGET" != "ALL" ] && [ "$TARGET" != "$book" ]; then
               continue
             fi
@@ -66,39 +64,76 @@ jobs:
             
             echo ""
             echo "========================================="
-            echo "📚 $book"
+            echo "📚 Downloading: $book"
+            echo "   URL: $url"
             echo "   Previous files: $prev"
-            echo "   Current size: $(du -sh $dir 2>/dev/null | cut -f1 || echo 0)"
             echo "========================================="
             
-            # Download with no-clobber (skip existing) - 42 minute timeout
+            # RECURSIVE download with proper flags
             timeout 2520 wget \
-              --mirror \
+              --recursive \
+              --level=10 \
+              --no-parent \
               --convert-links \
               --adjust-extension \
               --page-requisites \
-              --no-parent \
-              --wait=0.5 \
+              --wait=0.3 \
               --random-wait \
-              --level=inf \
               --no-clobber \
               --directory-prefix="$dir" \
+              --span-hosts \
+              --domains=chem.libretexts.org,cdn.libretexts.org \
               --no-verbose \
               --timeout=15 \
               --tries=2 \
-              "$url" 2>&1 | grep -E "(saved|URL:)" | tail -100 || true
+              --reject='*.pdf,*.zip,*.epub,*.svgz' \
+              "$url" 2>&1 | grep -v "^$" | tail -50 || true
             
-            # Update progress
-            new=$(find "$dir" -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
+            # Count files recursively
+            new=$(find "$dir" -type f -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
             echo "$new" > "$progress_file"
+            
             diff=$((new - prev))
+            size=$(du -sh "$dir" 2>/dev/null | cut -f1)
+            
             echo "  ✅ +$diff new files"
             echo "  📊 Total: $new files"
-            echo "  💾 Size: $(du -sh $dir 2>/dev/null | cut -f1)"
-            echo ""
+            echo "  💾 Size: $size"
+            
+            # Show what was downloaded
+            if [ "$diff" -gt 0 ]; then
+              echo "  📄 Newest files:"
+              find "$dir" -name "*.html" -newer "$progress_file" -type f 2>/dev/null | head -5 | while read f; do
+                echo "    - $(basename "$f")"
+              done
+            fi
           done
 
-      - name: Show combined status
+      - name: Debug - show directory structure
+        if: always()
+        run: |
+          echo ""
+          echo "========================================="
+          echo "🔍 DIRECTORY STRUCTURE"
+          echo "========================================="
+          for book in organic inorganic physical analytical general; do
+            dir="textbooks/${book}"
+            if [ -d "$dir" ]; then
+              echo ""
+              echo "📁 $book:"
+              echo "  Total files: $(find $dir -type f | wc -l)"
+              echo "  Total dirs: $(find $dir -type d | wc -l)"
+              echo "  First 3 levels:"
+              find "$dir" -maxdepth 3 -type d 2>/dev/null | head -20 | while read d; do
+                count=$(ls "$d" 2>/dev/null | wc -l)
+                echo "    $d/ ($count items)"
+              done
+            else
+              echo "  ❌ $book: directory not found"
+            fi
+          done
+
+      - name: Show overall progress
         run: |
           echo ""
           echo "========================================="
@@ -126,9 +161,8 @@ jobs:
             echo "No new files to commit"
           else
             total=$(find textbooks -name "*.html" -o -name "*.htm" | wc -l)
-            added=$(git diff --staged --name-only | wc -l)
-            git commit -m "📚 +$added files | Total: $total pages | $(date +%H:%M)"
-            git push || echo "Push failed, will retry next run"
+            git commit -m "📚 Progress: $total total pages | $(date +%H:%M)"
+            git push
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
