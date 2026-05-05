@@ -8,7 +8,7 @@ on:
         required: true
         default: 'https://chem.libretexts.org/'
       depth:
-        description: 'Maximum recursion depth (1 = homepage only, 5 = deep)'
+        description: 'Maximum recursion depth (1 = homepage, 5 = deep)'
         required: false
         default: '3'
       wait:
@@ -16,14 +16,18 @@ on:
         required: false
         default: '0.5'
       output_name:
-        description: 'Name of the output ZIP (without .zip)'
+        description: 'Base name for the backup (without .zip)'
         required: false
         default: 'offline-backup'
+      split_size:
+        description: 'Split size (e.g., 90M, 2G, 500M). Leave blank for no split.'
+        required: false
+        default: '90M'
 
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 30  # increase if site is large
+    timeout-minutes: 60
 
     steps:
       - name: 📥 Checkout repository
@@ -31,15 +35,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🛠️ Install wget
-        run: sudo apt-get update && sudo apt-get install -y wget
+      - name: 🛠️ Install tools
+        run: sudo apt-get update && sudo apt-get install -y wget zip
 
       - name: 🌍 Mirror website with wget
         run: |
-          # Create a directory for the download
-          mkdir -p website-mirror
-          
-          # Mirror the site (adjust options as needed)
+          mkdir -p mirror_output
           wget \
             --mirror \
             --convert-links \
@@ -48,33 +49,38 @@ jobs:
             --no-parent \
             --wait=${{ github.event.inputs.wait }} \
             --level=${{ github.event.inputs.depth }} \
-            --directory-prefix=./website-mirror \
+            --directory-prefix=./mirror_output \
             --no-verbose \
-            --show-progress \
             ${{ github.event.inputs.site_url }}
-          
-          echo "Mirror completed. Listing downloaded files:"
-          du -sh website-mirror/
+          du -sh mirror_output/
 
-      - name: 📦 Create ZIP archive
+      - name: 📦 Create ZIP archive (with optional split)
         run: |
-          ZIP_NAME="${{ github.event.inputs.output_name }}.zip"
-          cd website-mirror
-          zip -r ../"$ZIP_NAME" .
-          cd ..
-          echo "ZIP created: $ZIP_NAME ($(du -sh "$ZIP_NAME" | cut -f1))"
+          BASE_NAME="${{ github.event.inputs.output_name }}"
+          SPLIT_SIZE="${{ github.event.inputs.split_size }}"
+          cd mirror_output
 
-      - name: 🚀 Commit and push ZIP to repository
+          if [ -n "$SPLIT_SIZE" ]; then
+            # Create split zip: parts named BASE_NAME.zip, BASE_NAME.z01, BASE_NAME.z02, ...
+            zip -r -s "$SPLIT_SIZE" ../"$BASE_NAME.zip" .
+            echo "Created split archives:"
+            ls -lh ../${BASE_NAME}.* 2>/dev/null || true
+          else
+            # No split – single zip
+            zip -r ../"$BASE_NAME.zip" .
+            echo "Created single archive:"
+            ls -lh ../"$BASE_NAME.zip"
+          fi
+
+      - name: 🚀 Push backup parts to repository
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Move the ZIP to a permanent location (e.g., /backups)
           mkdir -p backups
-          mv *.zip backups/
+          # Move all parts (or single zip)
+          mv ../${{ github.event.inputs.output_name }}.* backups/ 2>/dev/null || mv ../${{ github.event.inputs.output_name }}.zip backups/
           
           git add backups/
-          git commit -m "📦 Add offline backup of ${{ github.event.inputs.site_url }}"
+          git commit -m "📦 Backup of ${{ github.event.inputs.site_url }}" || echo "No changes to commit"
           git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
