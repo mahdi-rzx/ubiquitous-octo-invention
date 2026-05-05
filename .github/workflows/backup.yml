@@ -9,10 +9,9 @@ on:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 35          # extra 5 min safety, but wget itself stops at 30 min
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -22,8 +21,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # ---------------------------------------------------------------
+      # Download for exactly 30 minutes
+      # ---------------------------------------------------------------
       - name: Download for 30 minutes
-        # timeout kills wget after exactly 30 minutes
+        id: download
+        continue-on-error: true        # timeout = 124 is NOT a failure
         run: |
           timeout 1800 wget \
             --mirror \
@@ -40,9 +43,13 @@ jobs:
             --output-file=wget.log \
             --no-verbose \
             https://chem.libretexts.org/
+          echo "wget ended with exit code: $?"
 
+      # ---------------------------------------------------------------
+      # Always commit & push, even if wget was killed
+      # ---------------------------------------------------------------
       - name: Commit and push progress
-        if: always()   # even if wget was killed by timeout
+        if: always()
         run: |
           git add archive/ wget.log
           if git diff --cached --quiet; then
