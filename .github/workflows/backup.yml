@@ -63,7 +63,7 @@ jobs:
           # wget will spider through them to discover new URLs, but won't fetch the bodies.
           # This is efficient because wget checks the local file FIRST.
 
-          timeout 1800 wget \
+          timeout 180 wget \
             --recursive \
             --level=inf \
             --no-clobber \
