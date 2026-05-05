@@ -1,195 +1,117 @@
-name: Download Chemistry Textbooks
+name: 🧪 Chemistry Library Offline Backup
 
 on:
   workflow_dispatch:
+    inputs:
+      split_size:
+        description: 'Split size for ZIP parts (e.g., 90M, 200M)'
+        required: false
+        default: '90M'
+      wait_time:
+        description: 'Delay between requests (seconds)'
+        required: false
+        default: '0.5'
+  
   schedule:
-    - cron: '0 */2 * * *'
-
-permissions:
-  contents: write
+    - cron: '0 0 1 * *'  # Monthly auto-backup
 
 jobs:
-  download:
+  backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    
+    timeout-minutes: 360  # 6 hours max
+
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wget
-          pip3 install beautifulsoup4 requests
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download with Python crawler
-        run: |
-          python3 << 'PYEOF'
-          import requests
-          from bs4 import BeautifulSoup
-          import os, time, json
-          from urllib.parse import urljoin, urlparse
-          
-          BOOKS = {
-              "organic": "https://chem.libretexts.org/Bookshelves/Organic_Chemistry",
-              "inorganic": "https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry",
-              "physical": "https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry",
-              "analytical": "https://chem.libretexts.org/Bookshelves/Analytical_Chemistry",
-              "general": "https://chem.libretexts.org/Bookshelves/General_Chemistry",
-          }
-          
-          HEADERS = {
-              'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
-          }
-          
-          MAX_PAGES_PER_RUN = 200  # Limit per book per run
-          os.makedirs('progress', exist_ok=True)
-          
-          for book_name, base_url in BOOKS.items():
-              print(f"\n{'='*60}")
-              print(f"📚 {book_name.upper()}")
-              print(f"{'='*60}")
-              
-              # Load progress
-              progress_file = f'progress/{book_name}.json'
-              if os.path.exists(progress_file):
-                  with open(progress_file) as f:
-                      state = json.load(f)
-                  visited = set(state.get('visited', []))
-                  queued = state.get('queued', [])
-                  page_count = state.get('count', 0)
-              else:
-                  visited = set()
-                  queued = [(base_url, 'index.html')]
-                  page_count = 0
-              
-              print(f"Previously downloaded: {page_count} pages")
-              print(f"Queued URLs: {len(queued)}")
-              
-              download_dir = f'textbooks/{book_name}'
-              os.makedirs(download_dir, exist_ok=True)
-              
-              downloaded_this_run = 0
-              
-              while queued and downloaded_this_run < MAX_PAGES_PER_RUN:
-                  url, filename = queued.pop(0)
-                  
-                  if url in visited:
-                      continue
-                  
-                  try:
-                      resp = requests.get(url, headers=HEADERS, timeout=15)
-                      
-                      if resp.status_code != 200:
-                          visited.add(url)
-                          continue
-                      
-                      # Check if it's actually HTML
-                      content_type = resp.headers.get('content-type', '')
-                      if 'text/html' not in content_type:
-                          visited.add(url)
-                          continue
-                      
-                      visited.add(url)
-                      
-                      # Save the page
-                      safe_name = filename.replace('/', '_').replace(':', '_')[:200]
-                      if not safe_name.endswith('.html'):
-                          safe_name += '.html'
-                      
-                      filepath = os.path.join(download_dir, safe_name)
-                      with open(filepath, 'w', encoding='utf-8') as f:
-                          f.write(resp.text)
-                      
-                      page_count += 1
-                      downloaded_this_run += 1
-                      
-                      # Parse for more links
-                      soup = BeautifulSoup(resp.text, 'html.parser')
-                      
-                      # Find the book's table of contents / navigation
-                      links_found = 0
-                      for link in soup.find_all('a', href=True):
-                          href = link['href']
-                          full_url = urljoin(url, href)
-                          parsed = urlparse(full_url)
-                          
-                          # Only follow links within the same book
-                          if base_url in full_url and full_url not in visited:
-                              # Create short filename from URL path
-                              path = parsed.path.strip('/')
-                              link_name = path.replace('/', '_') if path else f'page_{len(visited)}'
-                              
-                              if (full_url, link_name) not in queued:
-                                  queued.append((full_url, link_name))
-                                  links_found += 1
-                      
-                      if downloaded_this_run % 10 == 0:
-                          print(f"  [{page_count}] {url[:80]}... ({links_found} new links)")
-                      
-                      time.sleep(0.3)  # Be polite
-                      
-                  except Exception as e:
-                      print(f"  ✗ Error: {e}")
-                      visited.add(url)
-                      continue
-              
-              # Save progress
-              state = {
-                  'count': page_count,
-                  'visited': list(visited),
-                  'queued': queued
-              }
-              with open(progress_file, 'w') as f:
-                  json.dump(state, f)
-              
-              print(f"\n  ✅ Downloaded {downloaded_this_run} new pages this run")
-              print(f"  📊 Total: {page_count} pages")
-              print(f"  ⏳ Remaining in queue: {len(queued)}")
-              
-              # Get directory size
-              total_size = 0
-              for f in os.listdir(download_dir):
-                  total_size += os.path.getsize(os.path.join(download_dir, f))
-              print(f"  💾 Size: {total_size / 1024 / 1024:.1f} MB")
-          
-          print(f"\n{'='*60}")
-          print("🏁 RUN COMPLETE")
-          print(f"{'='*60}")
-          PYEOF
+      - name: 🛠️ Install tools
+        run: sudo apt-get update && sudo apt-get install -y wget zip
 
-      - name: Show download summary
+      - name: 🌍 Download Chemistry Textbooks
         run: |
-          echo "========================================="
-          echo "DOWNLOAD STATUS"
-          echo "========================================="
-          for book in organic inorganic physical analytical general; do
-            if [ -f "progress/${book}.json" ]; then
-              count=$(python3 -c "import json; print(json.load(open('progress/${book}.json'))['count'])")
-              queued=$(python3 -c "import json; print(len(json.load(open('progress/${book}.json'))['queued']))")
-              size=$(du -sh "textbooks/${book}" 2>/dev/null | cut -f1)
-              echo "📚 $book: $count pages, $queued queued, $size"
-            else
-              echo "📚 $book: Not started"
-            fi
+          mkdir -p chemistry-library
+          
+          # Define all chemistry branches
+          declare -A BOOKS=(
+            ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
+            ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
+            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
+            ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
+            ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
+            ["biochemistry"]="https://chem.libretexts.org/Bookshelves/Biochemistry/"
+          )
+          
+          # Download each book into its own folder
+          for branch in "${!BOOKS[@]}"; do
+            echo "📚 Downloading: $branch chemistry..."
+            wget \
+              --mirror \
+              --convert-links \
+              --adjust-extension \
+              --page-requisites \
+              --no-parent \
+              --wait=${{ github.event.inputs.wait_time }} \
+              --level=inf \
+              --accept-regex "${BOOKS[$branch]}.*" \
+              --reject-regex '(\.pdf$|\.PDF$|download|\.zip$)' \
+              --directory-prefix="./chemistry-library/$branch" \
+              --no-verbose \
+              ${BOOKS[$branch]} || echo "⚠️ Some $branch pages failed"
           done
-          echo ""
-          echo "Total HTML files: $(find textbooks -name '*.html' | wc -l)"
-          echo "Total size: $(du -sh textbooks 2>/dev/null | cut -f1)"
+          
+          echo "📊 Download complete! Size per branch:"
+          du -sh chemistry-library/*/
 
-      - name: Commit progress
+      - name: 📦 Create ZIP archives (split)
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          SPLIT="${{ github.event.inputs.split_size }}"
+          DATE_TAG=$(date +%Y-%m-%d)
           
-          git add progress/ textbooks/
+          mkdir -p archives
           
-          if git diff --staged --quiet; then
-            echo "No changes"
-          else
-            git commit -m "📚 Download progress: $(find textbooks -name '*.html' | wc -l) total pages"
-            git push
-          fi
+          # Option 1: One big chemistry library ZIP
+          echo "Creating complete chemistry library archive..."
+          cd chemistry-library
+          zip -r -s "$SPLIT" "../archives/chemistry-library-${DATE_TAG}.zip" .
+          cd ..
+          
+          echo "📊 Archives created:"
+          ls -lh archives/
+          
+          # Calculate total size
+          echo "Total archive size:"
+          du -sh archives/
+
+      - name: 🚀 Commit and push to repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Move archives to backups folder
+          mkdir -p backups
+          mv archives/* backups/
+          
+          # Remove old backups (keep only latest 2)
+          ls -t backups/chemistry-library-* | tail -n +3 | xargs -r rm
+          
+          git add backups/
+          git commit -m "🧪 Update chemistry library backup ($(date +%Y-%m-%d))" || echo "No changes"
+          git push
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📊 Summary
+        run: |
+          echo "✅ Chemistry Library Backup Complete!"
+          echo "📚 Books included:"
+          echo "  • Organic Chemistry"
+          echo "  • Inorganic Chemistry"  
+          echo "  • Analytical Chemistry"
+          echo "  • Physical & Theoretical Chemistry"
+          echo "  • General Chemistry"
+          echo "  • Biochemistry"
+          echo ""
+          echo "📦 Total size:"
+          du -sh backups/
