@@ -1,234 +1,88 @@
-name: Chem LibreTexts Structure Crawler
+name: Archive Chem LibreTexts
 
 on:
   schedule:
-    # Run weekly on Sunday at midnight UTC
-    - cron: '0 0 * * 0'
-  workflow_dispatch:
-    # Allow manual triggering
-    inputs:
-      max_pages:
-        description: 'Maximum pages to crawl'
-        required: false
-        default: '5000'
-      crawl_delay:
-        description: 'Delay between requests (seconds)'
-        required: false
-        default: '1'
+    # Run every 6 hours – each run stops after 5.5 h to stay within GitHub’s limit
+    - cron: '0 */6 * * *'
+  workflow_dispatch:        # manual trigger
 
 jobs:
-  crawl-structure:
+  mirror:
     runs-on: ubuntu-latest
+    timeout-minutes: 360     # GitHub max (6 h). We'll let wget run for 5.5 h.
     
     steps:
+      # ---------------------------------------------------------------
+      # 1. Checkout the whole repository (including existing archive/)
+      # ---------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Setup Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install scrapy requests beautifulsoup4 lxml
-      
-      - name: Create crawler script
-        run: |
-          cat > crawl_libretexts.py << 'PYTHON_EOF'
-          import scrapy
-          from scrapy.crawler import CrawlerProcess
-          from scrapy.spiders import CrawlSpider, Rule
-          from scrapy.linkextractors import LinkExtractor
-          import json
-          import os
-          from datetime import datetime
-          from urllib.parse import urljoin, urlparse
-          from collections import defaultdict
+          fetch-depth: 0     # needed to push new commits
 
-          class ChemLibreTextsSpider(CrawlSpider):
-              name = 'chem_libretexts'
-              allowed_domains = ['chem.libretexts.org']
-              start_urls = ['https://chem.libretexts.org/']
-              
-              # Rules for following links
-              rules = (
-                  Rule(LinkExtractor(
-                      allow=(r'/Bookshelves/', r'/Courses/', r'/Ancillary_Materials/'),
-                      deny=(r'\?', r'#', r'/pdf/', r'/epub/'),
-                      unique=True
-                  ), callback='parse_item', follow=True),
-              )
-              
-              custom_settings = {
-                  'DEPTH_LIMIT': 8,
-                  'CLOSESPIDER_PAGECOUNT': int(os.environ.get('MAX_PAGES', 5000)),
-                  'DOWNLOAD_DELAY': float(os.environ.get('CRAWL_DELAY', 1)),
-                  'ROBOTSTXT_OBEY': True,
-                  'USER_AGENT': 'ChemLibreTexts Structure Crawler (Educational Backup)',
-                  'CONCURRENT_REQUESTS': 1,
-                  'LOG_LEVEL': 'INFO',
-                  'FEEDS': {
-                      'sitemap.json': {
-                          'format': 'json',
-                          'encoding': 'utf-8',
-                          'overwrite': True,
-                      }
-                  }
-              }
-              
-              def __init__(self, *args, **kwargs):
-                  super().__init__(*args, **kwargs)
-                  self.structure = defaultdict(list)
-                  self.pages_crawled = 0
-                  self.start_time = datetime.now()
-              
-              def parse_item(self, response):
-                  self.pages_crawled += 1
-                  
-                  # Extract breadcrumb hierarchy
-                  breadcrumbs = response.css('.breadcrumb li a::text').getall()
-                  if not breadcrumbs:
-                      breadcrumbs = response.css('nav[aria-label="breadcrumb"] a::text').getall()
-                  
-                  # Extract page metadata
-                  page_data = {
-                      'url': response.url,
-                      'title': response.css('title::text').get('').strip(),
-                      'h1': response.css('h1::text').get('').strip(),
-                      'path': urlparse(response.url).path,
-                      'depth': response.meta.get('depth', 0),
-                      'breadcrumbs': breadcrumbs,
-                      'last_modified': response.css('meta[property="article:modified_time"]::attr(content)').get(),
-                  }
-                  
-                  # Get bookshelf/book structure if available
-                  if '/Bookshelves/' in response.url:
-                      parts = response.url.split('/Bookshelves/')[1].split('/')
-                      if len(parts) > 0:
-                          page_data['bookshelf'] = parts[0]
-                      if len(parts) > 1:
-                          page_data['book'] = parts[1]
-                  
-                  # Count subpages/sections
-                  subpages = response.css('.mt-content-container a::attr(href)').getall()
-                  internal_subpages = [url for url in subpages if 'chem.libretexts.org' in url]
-                  page_data['internal_link_count'] = len(internal_subpages)
-                  
-                  # Track structure
-                  parent_path = '/'.join(response.url.split('/')[:-2])
-                  self.structure[parent_path].append(response.url)
-                  
-                  yield page_data
-              
-              def closed(self, reason):
-                  # Save summary statistics
-                  summary = {
-                      'crawl_date': datetime.now().isoformat(),
-                      'total_pages': self.pages_crawled,
-                      'duration_seconds': (datetime.now() - self.start_time).total_seconds(),
-                      'stop_reason': reason,
-                      'domain': 'chem.libretexts.org'
-                  }
-                  
-                  with open('crawl_summary.json', 'w') as f:
-                      json.dump(summary, f, indent=2)
-                  
-                  # Save hierarchical structure
-                  with open('site_structure.json', 'w') as f:
-                      json.dump(dict(self.structure), f, indent=2)
+      # ---------------------------------------------------------------
+      # 2. Configure git for the automated commits
+      # ---------------------------------------------------------------
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Run the spider
-          if __name__ == '__main__':
-              process = CrawlerProcess()
-              process.crawl(ChemLibreTextsSpider)
-              process.start()
-          PYTHON_EOF
-      
-      - name: Run crawler
-        env:
-          MAX_PAGES: ${{ github.event.inputs.max_pages || '5000' }}
-          CRAWL_DELAY: ${{ github.event.inputs.crawl_delay || '1' }}
-        run: python crawl_libretexts.py
-      
-      - name: Process results
+      # ---------------------------------------------------------------
+      # 3. Mirror the site with 30‑minute checkpoints
+      # ---------------------------------------------------------------
+      - name: Mirror with frequent commits
+        id: mirror
+        # Prevent workflow failure if wget is killed by timeout
+        continue-on-error: true   
         run: |
-          python -c "
-          import json
-          
-          # Load and analyze sitemap
-          with open('sitemap.json', 'r') as f:
-              pages = [json.loads(line) for line in f]
-          
-          # Create organized structure
-          bookshelves = {}
-          courses = {}
-          other = []
-          
-          for page in pages:
-              if '/Bookshelves/' in page['url']:
-                  shelf = page.get('bookshelf', 'Unknown')
-                  if shelf not in bookshelves:
-                      bookshelves[shelf] = []
-                  bookshelves[shelf].append(page)
-              elif '/Courses/' in page['url']:
-                  courses[page['url']] = page
-              else:
-                  other.append(page)
-          
-          # Generate markdown summary
-          with open('README.md', 'w') as f:
-              f.write(f'# Chemistry LibreTexts Structure\n\n')
-              f.write(f'**Crawl Date:** {pages[0][\"crawl_date\"] if pages else \"Unknown\"}\n')
-              f.write(f'**Pages Found:** {len(pages)}\n\n')
-              f.write('## Bookshelves\n\n')
-              for shelf, shelf_pages in sorted(bookshelves.items()):
-                  f.write(f'- **{shelf}**: {len(shelf_pages)} pages\n')
-          
-          # Save organized structure
-          structure = {
-              'metadata': {
-                  'crawl_date': pages[0]['crawl_date'] if pages else '',
-                  'total_pages': len(pages),
-              },
-              'bookshelves': {k: len(v) for k, v in bookshelves.items()},
-              'courses_count': len(courses),
-              'other_pages': len(other)
-          }
-          
-          with open('organized_structure.json', 'w') as f:
-              json.dump(structure, f, indent=2)
-          "
-      
-      - name: Create artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: chem-librestexts-structure
-          path: |
-            sitemap.json
-            site_structure.json
-            organized_structure.json
-            crawl_summary.json
-            README.md
-          retention-days: 90
-      
-      - name: Commit to repository (optional)
-        if: github.event_name == 'schedule'
+          # Start the mirror in the background, limited to 5.5 hours (19800 s)
+          timeout 19800 wget \
+            --mirror \
+            --convert-links \
+            --adjust-extension \
+            --page-requisites \
+            --no-parent \
+            --domains=chem.libretexts.org \
+            --wait=1 \
+            --random-wait \
+            --limit-rate=200k \
+            --reject='*.pdf,*.zip,*.mp4,*.mov,*.avi,*.exe' \
+            --directory-prefix=archive \
+            --no-verbose \
+            https://chem.libretexts.org/ \
+            2>&1 | tee wget.log &
+
+          WGET_PID=$!
+          echo "wget started with PID $WGET_PID"
+
+          # Commit every 30 minutes while wget is running
+          while kill -0 $WGET_PID 2>/dev/null; do
+            sleep 1800    # 30 minutes
+
+            # Commit whatever has been downloaded so far.
+            # Ignore errors if nothing changed.
+            git add archive/ wget.log 2>/dev/null
+            git commit -m "mirror checkpoint at $(date -u +'%Y-%m-%d %H:%M UTC')" || true
+          done
+
+          # wget has finished (or was killed by timeout). Wait and capture exit code.
+          wait $WGET_PID || WGET_EXIT=$?
+          echo "wget exit code: ${WGET_EXIT:-unknown}"
+
+          # Save the exit code for later steps
+          echo "wget_exit=${WGET_EXIT:-0}" >> $GITHUB_OUTPUT
+
+      # ---------------------------------------------------------------
+      # 4. Final commit & push – run even if mirror step was killed
+      # ---------------------------------------------------------------
+      - name: Commit and push final state
+        if: always()
         run: |
-          git config --global user.name 'GitHub Action'
-          git config --global user.email 'action@github.com'
-          
-          # Create data directory if it doesn't exist
-          mkdir -p data
-          
-          # Move files to data directory
-          mv sitemap.json site_structure.json organized_structure.json crawl_summary.json README.md data/
-          
-          # Commit and push
-          git add data/
-          git commit -m "Update site structure: $(date +%Y-%m-%d)" || echo "No changes to commit"
-          git push || echo "Push failed - might need authentication setup"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git add archive/ wget.log
+          if git diff --cached --quiet; then
+            echo "No changes to commit after final sync."
+          else
+            git commit -m "Final mirror update ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+          fi
+          git push
