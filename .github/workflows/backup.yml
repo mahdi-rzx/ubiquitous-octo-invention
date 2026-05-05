@@ -1,386 +1,234 @@
-name: 🌐 Resumable Chemistry Downloader
+name: Chem LibreTexts Structure Crawler
 
 on:
-  workflow_dispatch:
-    inputs:
-      book:
-        description: 'Chemistry book to download'
-        required: true
-        type: choice
-        options:
-          - organic
-          - inorganic
-          - physical
-          - analytical
-          - general
-          - ALL
-        default: 'ALL'
-      action:
-        description: 'Download action'
-        required: true
-        type: choice
-        options:
-          - download
-          - stop
-          - status
-        default: 'download'
   schedule:
-    - cron: '*/50 * * * *'
-
-permissions:
-  contents: write
+    # Run weekly on Sunday at midnight UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+    # Allow manual triggering
+    inputs:
+      max_pages:
+        description: 'Maximum pages to crawl'
+        required: false
+        default: '5000'
+      crawl_delay:
+        description: 'Delay between requests (seconds)'
+        required: false
+        default: '1'
 
 jobs:
-  download:
+  crawl-structure:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y wget bc
-
-      - name: Handle stop command
-        if: github.event.inputs.action == 'stop'
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
         run: |
-          # Create stop signal file
-          mkdir -p progress
-          echo "STOPPED:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > progress/STOP.txt
-          
-          # Git commit the stop signal
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add progress/
-          git commit -m "🛑 Stop signal | $(date +%H:%M)"
-          git push
+          python -m pip install --upgrade pip
+          pip install scrapy requests beautifulsoup4 lxml
+      
+      - name: Create crawler script
+        run: |
+          cat > crawl_libretexts.py << 'PYTHON_EOF'
+          import scrapy
+          from scrapy.crawler import CrawlerProcess
+          from scrapy.spiders import CrawlSpider, Rule
+          from scrapy.linkextractors import LinkExtractor
+          import json
+          import os
+          from datetime import datetime
+          from urllib.parse import urljoin, urlparse
+          from collections import defaultdict
+
+          class ChemLibreTextsSpider(CrawlSpider):
+              name = 'chem_libretexts'
+              allowed_domains = ['chem.libretexts.org']
+              start_urls = ['https://chem.libretexts.org/']
+              
+              # Rules for following links
+              rules = (
+                  Rule(LinkExtractor(
+                      allow=(r'/Bookshelves/', r'/Courses/', r'/Ancillary_Materials/'),
+                      deny=(r'\?', r'#', r'/pdf/', r'/epub/'),
+                      unique=True
+                  ), callback='parse_item', follow=True),
+              )
+              
+              custom_settings = {
+                  'DEPTH_LIMIT': 8,
+                  'CLOSESPIDER_PAGECOUNT': int(os.environ.get('MAX_PAGES', 5000)),
+                  'DOWNLOAD_DELAY': float(os.environ.get('CRAWL_DELAY', 1)),
+                  'ROBOTSTXT_OBEY': True,
+                  'USER_AGENT': 'ChemLibreTexts Structure Crawler (Educational Backup)',
+                  'CONCURRENT_REQUESTS': 1,
+                  'LOG_LEVEL': 'INFO',
+                  'FEEDS': {
+                      'sitemap.json': {
+                          'format': 'json',
+                          'encoding': 'utf-8',
+                          'overwrite': True,
+                      }
+                  }
+              }
+              
+              def __init__(self, *args, **kwargs):
+                  super().__init__(*args, **kwargs)
+                  self.structure = defaultdict(list)
+                  self.pages_crawled = 0
+                  self.start_time = datetime.now()
+              
+              def parse_item(self, response):
+                  self.pages_crawled += 1
+                  
+                  # Extract breadcrumb hierarchy
+                  breadcrumbs = response.css('.breadcrumb li a::text').getall()
+                  if not breadcrumbs:
+                      breadcrumbs = response.css('nav[aria-label="breadcrumb"] a::text').getall()
+                  
+                  # Extract page metadata
+                  page_data = {
+                      'url': response.url,
+                      'title': response.css('title::text').get('').strip(),
+                      'h1': response.css('h1::text').get('').strip(),
+                      'path': urlparse(response.url).path,
+                      'depth': response.meta.get('depth', 0),
+                      'breadcrumbs': breadcrumbs,
+                      'last_modified': response.css('meta[property="article:modified_time"]::attr(content)').get(),
+                  }
+                  
+                  # Get bookshelf/book structure if available
+                  if '/Bookshelves/' in response.url:
+                      parts = response.url.split('/Bookshelves/')[1].split('/')
+                      if len(parts) > 0:
+                          page_data['bookshelf'] = parts[0]
+                      if len(parts) > 1:
+                          page_data['book'] = parts[1]
+                  
+                  # Count subpages/sections
+                  subpages = response.css('.mt-content-container a::attr(href)').getall()
+                  internal_subpages = [url for url in subpages if 'chem.libretexts.org' in url]
+                  page_data['internal_link_count'] = len(internal_subpages)
+                  
+                  # Track structure
+                  parent_path = '/'.join(response.url.split('/')[:-2])
+                  self.structure[parent_path].append(response.url)
+                  
+                  yield page_data
+              
+              def closed(self, reason):
+                  # Save summary statistics
+                  summary = {
+                      'crawl_date': datetime.now().isoformat(),
+                      'total_pages': self.pages_crawled,
+                      'duration_seconds': (datetime.now() - self.start_time).total_seconds(),
+                      'stop_reason': reason,
+                      'domain': 'chem.libretexts.org'
+                  }
+                  
+                  with open('crawl_summary.json', 'w') as f:
+                      json.dump(summary, f, indent=2)
+                  
+                  # Save hierarchical structure
+                  with open('site_structure.json', 'w') as f:
+                      json.dump(dict(self.structure), f, indent=2)
+
+          # Run the spider
+          if __name__ == '__main__':
+              process = CrawlerProcess()
+              process.crawl(ChemLibreTextsSpider)
+              process.start()
+          PYTHON_EOF
+      
+      - name: Run crawler
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Handle status command
-        if: github.event.inputs.action == 'status'
+          MAX_PAGES: ${{ github.event.inputs.max_pages || '5000' }}
+          CRAWL_DELAY: ${{ github.event.inputs.crawl_delay || '1' }}
+        run: python crawl_libretexts.py
+      
+      - name: Process results
         run: |
-          echo "========================================="
-          echo "📊 DOWNLOAD STATUS REPORT"
-          echo "========================================="
+          python -c "
+          import json
           
-          # Check if currently running
-          if curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                  "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=in_progress" | \
-             grep -q "Resumable Chemistry Downloader" 2>/dev/null; then
-            echo "🏃 STATUS: Running"
-          else
-            echo "⏸️  STATUS: Idle"
-          fi
+          # Load and analyze sitemap
+          with open('sitemap.json', 'r') as f:
+              pages = [json.loads(line) for line in f]
           
-          echo ""
-          echo "Mirror content sizes:"
-          for book in organic inorganic physical analytical general; do
-            if [ -d "mirror_output/$book" ]; then
-              files=$(find "mirror_output/$book" -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
-              size=$(du -sh "mirror_output/$book" 2>/dev/null | cut -f1)
-              echo "  $book: $files files ($size)"
-            fi
-          done
+          # Create organized structure
+          bookshelves = {}
+          courses = {}
+          other = []
           
-          total_files=$(find mirror_output -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
-          total_size=$(du -sh mirror_output 2>/dev/null | cut -f1)
-          echo "  TOTAL: $total_files files ($total_size)"
+          for page in pages:
+              if '/Bookshelves/' in page['url']:
+                  shelf = page.get('bookshelf', 'Unknown')
+                  if shelf not in bookshelves:
+                      bookshelves[shelf] = []
+                  bookshelves[shelf].append(page)
+              elif '/Courses/' in page['url']:
+                  courses[page['url']] = page
+              else:
+                  other.append(page)
           
-          # Check stop file
-          if [ -f "progress/STOP.txt" ]; then
-            echo ""
-            echo "⚠️  Stop signal detected: $(cat progress/STOP.txt)"
-            echo "   Remove progress/STOP.txt to resume downloads"
-          fi
+          # Generate markdown summary
+          with open('README.md', 'w') as f:
+              f.write(f'# Chemistry LibreTexts Structure\n\n')
+              f.write(f'**Crawl Date:** {pages[0][\"crawl_date\"] if pages else \"Unknown\"}\n')
+              f.write(f'**Pages Found:** {len(pages)}\n\n')
+              f.write('## Bookshelves\n\n')
+              for shelf, shelf_pages in sorted(bookshelves.items()):
+                  f.write(f'- **{shelf}**: {len(shelf_pages)} pages\n')
           
-          if [ -f "progress/COMPLETED.txt" ]; then
-            echo ""
-            echo "✅ All downloads completed at $(cat progress/COMPLETED.txt)"
-          fi
-
-      - name: Download with resume and auto-push at 40 min
-        if: github.event.inputs.action == 'download' || github.event_name == 'schedule'
-        run: |
-          # Function to commit and push progress
-          commit_progress() {
-            local reason="$1"
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            
-            git add mirror_output/ progress/ 2>/dev/null || true
-            
-            if git diff --staged --quiet; then
-              echo "📝 No changes to commit during auto-push"
-              return
-            fi
-            
-            # Create meaningful commit message
-            NEW_FILES=$(grep "NEW_FILES:" progress/CURRENT_RUN.txt 2>/dev/null | cut -d: -f2 || echo "0")
-            BOOKS_DONE=$(grep "BOOKS_PROCESSED:" progress/CURRENT_RUN.txt 2>/dev/null | cut -d: -f2 || echo "0")
-            ELAPSED=$(grep "DURATION:" progress/CURRENT_RUN.txt 2>/dev/null | cut -d: -f2 || echo "0s")
-            
-            COMMIT_MSG="⏰ Auto-save at ${ELAPSED} | ${BOOKS_DONE} books | +${NEW_FILES} pages | ${reason}"
-            
-            git commit -m "$COMMIT_MSG"
-            
-            # Push with retry
-            for i in {1..3}; do
-              if git push; then
-                echo "✅ Auto-push successful at $(date +%H:%M:%S)"
-                return 0
-              else
-                echo "⚠️  Push attempt $i failed, retrying..."
-                sleep 5
-                git pull --rebase || true
-              fi
-            done
-            echo "❌ Auto-push failed after 3 attempts"
+          # Save organized structure
+          structure = {
+              'metadata': {
+                  'crawl_date': pages[0]['crawl_date'] if pages else '',
+                  'total_pages': len(pages),
+              },
+              'bookshelves': {k: len(v) for k, v in bookshelves.items()},
+              'courses_count': len(courses),
+              'other_pages': len(other)
           }
           
-          # Check for stop signal
-          if [ -f "progress/STOP.txt" ]; then
-            echo "🛑 Stop signal detected. Skipping downloads."
-            exit 0
-          fi
-          
-          # Check if all downloads are completed
-          if [ -f "progress/COMPLETED.txt" ]; then
-            echo "✅ All downloads already completed. Skipping."
-            echo "   To restart, delete progress/COMPLETED.txt"
-            exit 0
-          fi
-          
-          declare -A BOOKS=(
-            ["organic"]="https://chem.libretexts.org/Bookshelves/Organic_Chemistry/"
-            ["inorganic"]="https://chem.libretexts.org/Bookshelves/Inorganic_Chemistry/"
-            ["physical"]="https://chem.libretexts.org/Bookshelves/Physical_and_Theoretical_Chemistry/"
-            ["analytical"]="https://chem.libretexts.org/Bookshelves/Analytical_Chemistry/"
-            ["general"]="https://chem.libretexts.org/Bookshelves/General_Chemistry/"
-          )
-          
-          # Determine target books
-          TARGET_BOOK="${{ github.event.inputs.book || 'ALL' }}"
-          if [ "$TARGET_BOOK" = "ALL" ]; then
-            BOOKS_TO_DOWNLOAD=("organic" "inorganic" "physical" "analytical" "general")
-          else
-            BOOKS_TO_DOWNLOAD=("$TARGET_BOOK")
-          fi
-          
-          # Initialize tracking
-          mkdir -p mirror_output progress
-          
-          # Start timestamp
-          START_TIME=$(date +%s)
-          echo "DOWNLOAD_STARTED:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > progress/CURRENT_RUN.txt
-          echo "TARGET:$TARGET_BOOK" >> progress/CURRENT_RUN.txt
-          
-          # Track which books to process
-          BOOKS_PROCESSED=0
-          TOTAL_BOOKS=${#BOOKS_TO_DOWNLOAD[@]}
-          OVERALL_NEW_FILES=0
-          LAST_COMMIT_TIME=$START_TIME
-          AUTO_PUSH_INTERVAL=2400  # 40 minutes in seconds
-          
-          echo "⏰ Auto-push configured for every 40 minutes"
-          echo "🚀 Starting downloads at $(date)"
-          
-          for book in "${BOOKS_TO_DOWNLOAD[@]}"; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            TIME_SINCE_COMMIT=$((CURRENT_TIME - LAST_COMMIT_TIME))
-            
-            # Check if it's time for auto-push (40 minutes)
-            if [ $TIME_SINCE_COMMIT -ge $AUTO_PUSH_INTERVAL ]; then
-              echo ""
-              echo "⏰ AUTO-PUSH TRIGGERED at ${ELAPSED}s (${TIME_SINCE_COMMIT}s since last push)"
-              echo "   Committing progress before continuing..."
-              commit_progress "40min checkpoint"
-              LAST_COMMIT_TIME=$(date +%s)
-            fi
-            
-            # Check for stop signal during run
-            if [ -f "progress/STOP.txt" ]; then
-              echo ""
-              echo "🛑 STOP SIGNAL DETECTED"
-              echo "   Stopping gracefully at: $book"
-              echo "   Committing final progress..."
-              commit_progress "stopped by signal"
-              exit 0
-            fi
-            
-            # Check time limit (leave 5 minutes for git operations)
-            TIME_LIMIT_SECONDS=2400  # 40 minutes (same as push interval)
-            if [ $ELAPSED -gt $TIME_LIMIT_SECONDS ]; then
-              echo ""
-              echo "⏰ TIME LIMIT REACHED ($(($ELAPSED/60)) minutes elapsed)"
-              echo "   Stopping at: $book. Will resume in next run"
-              echo "   Committing progress..."
-              commit_progress "time limit reached"
-              break
-            fi
-            
-            url="${BOOKS[$book]}"
-            dir="mirror_output/${book}"
-            progress_file="progress/${book}.txt"
-            
-            # Get previous count
-            if [ -f "$progress_file" ]; then
-              prev=$(cat "$progress_file")
-            else
-              prev=0
-            fi
-            
-            echo ""
-            echo "========================================="
-            echo "📚 $book ($((BOOKS_PROCESSED + 1))/$TOTAL_BOOKS)"
-            echo "   URL: $url"
-            echo "   Previous files: $prev"
-            echo "   Elapsed: $(($ELAPSED/60))m $(($ELAPSED%60))s | Next push in: $(((AUTO_PUSH_INTERVAL - TIME_SINCE_COMMIT)/60))m"
-            echo "========================================="
-            
-            # Mark book as in-progress
-            echo "IN_PROGRESS:$book:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "progress/${book}.status"
-            
-            # Run wget with timeout - but leave room for auto-push
-            WGET_TIMEOUT=$((AUTO_PUSH_INTERVAL - TIME_SINCE_COMMIT - 60))  # Leave 1 minute for commit
-            if [ $WGET_TIMEOUT -lt 60 ]; then
-              WGET_TIMEOUT=60  # Minimum 1 minute
-            fi
-            
-            echo "   Wget timeout: ${WGET_TIMEOUT}s"
-            
-            timeout $WGET_TIMEOUT wget \
-              --mirror \
-              --convert-links \
-              --adjust-extension \
-              --page-requisites \
-              --no-parent \
-              --wait=0.5 \
-              --random-wait \
-              --level=inf \
-              --no-clobber \
-              --directory-prefix="./$dir" \
-              --no-verbose \
-              --timeout=15 \
-              --tries=2 \
-              --no-check-certificate \
-              "$url" 2>&1 | tail -30 || true
-            
-            # Count all HTML files
-            if [ -d "$dir" ]; then
-              new=$(find "$dir" -name "*.html" -o -name "*.htm" 2>/dev/null | wc -l)
-            else
-              new=0
-            fi
-            
-            echo "$new" > "$progress_file"
-            
-            diff=$((new - prev))
-            OVERALL_NEW_FILES=$((OVERALL_NEW_FILES + diff))
-            
-            # Update run statistics
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            echo "DOWNLOAD_ENDED:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > progress/CURRENT_RUN.txt.tmp
-            echo "DURATION:${ELAPSED}s" >> progress/CURRENT_RUN.txt.tmp
-            echo "BOOKS_PROCESSED:${BOOKS_PROCESSED}/${TOTAL_BOOKS}" >> progress/CURRENT_RUN.txt.tmp
-            echo "NEW_FILES:${OVERALL_NEW_FILES}" >> progress/CURRENT_RUN.txt.tmp
-            mv progress/CURRENT_RUN.txt.tmp progress/CURRENT_RUN.txt
-            
-            # Calculate directory size
-            size=$(du -sh "$dir" 2>/dev/null | cut -f1 || echo "0")
-            
-            echo "  ✅ +$diff new | Total: $new files | Size: $size"
-            
-            # Show directory tree if no files downloaded
-            if [ "$new" -le 1 ] && [ -d "$dir" ]; then
-              echo "  🔍 Directory structure:"
-              find "$dir" -type d 2>/dev/null | head -10
-              echo "  📄 Files found:"
-              find "$dir" -type f 2>/dev/null | head -10
-            fi
-            
-            # Mark book as completed
-            if [ "$new" -gt 0 ]; then
-              echo "COMPLETED:$book:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "progress/${book}.status"
-            else
-              echo "FAILED:$book:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "progress/${book}.status"
-            fi
-            
-            BOOKS_PROCESSED=$((BOOKS_PROCESSED + 1))
-            
-            # Small commit after each book (optional, for frequent saves)
-            # Uncomment the next line if you want to save after each book
-            # commit_progress "after $book"
-          done
-          
-          # Check if all books are completed
-          ALL_COMPLETED=true
-          for book in "${BOOKS_TO_DOWNLOAD[@]}"; do
-            if [ ! -f "progress/${book}.status" ] || ! grep -q "COMPLETED" "progress/${book}.status"; then
-              ALL_COMPLETED=false
-              break
-            fi
-          done
-          
-          if [ "$ALL_COMPLETED" = true ]; then
-            echo "ALL_COMPLETED:$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > progress/COMPLETED.txt
-            echo ""
-            echo "🎉 ALL DOWNLOADS COMPLETED!"
-          fi
-          
-          # Final commit
-          echo ""
-          echo "📤 Final commit of all progress..."
-          commit_progress "run completed"
-
-      - name: Show overall progress
-        if: github.event.inputs.action == 'download' || github.event_name == 'schedule'
+          with open('organized_structure.json', 'w') as f:
+              json.dump(structure, f, indent=2)
+          "
+      
+      - name: Create artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chem-librestexts-structure
+          path: |
+            sitemap.json
+            site_structure.json
+            organized_structure.json
+            crawl_summary.json
+            README.md
+          retention-days: 90
+      
+      - name: Commit to repository (optional)
+        if: github.event_name == 'schedule'
         run: |
-          echo ""
-          echo "========================================="
-          echo "📊 OVERALL PROGRESS"
-          echo "========================================="
-          total=0
-          total_size="0"
+          git config --global user.name 'GitHub Action'
+          git config --global user.email 'action@github.com'
           
-          for book in organic inorganic physical analytical general; do
-            if [ -f "progress/${book}.txt" ]; then
-              count=$(cat "progress/${book}.txt")
-            else
-              count=0
-            fi
-            
-            if [ -d "mirror_output/${book}" ]; then
-              size=$(du -sh "mirror_output/${book}" 2>/dev/null | cut -f1 || echo "0")
-            else
-              size="0"
-            fi
-            
-            status=""
-            if [ -f "progress/${book}.status" ]; then
-              status=$(head -1 "progress/${book}.status")
-            fi
-            
-            printf "  %-15s %6s files  %8s  %s\n" "$book" "$count" "$size" "$status"
-            total=$((total + count))
-          done
+          # Create data directory if it doesn't exist
+          mkdir -p data
           
-          if [ -d "mirror_output" ]; then
-            total_size=$(du -sh "mirror_output" 2>/dev/null | cut -f1 || echo "0")
-          fi
+          # Move files to data directory
+          mv sitemap.json site_structure.json organized_structure.json crawl_summary.json README.md data/
           
-          echo "  -------------------------------------"
-          printf "  %-15s %6s files  %8s\n" "TOTAL" "$total" "$total_size"
-          echo "========================================="
-          
-          # Show run statistics
-          if [ -f "progress/CURRENT_RUN.txt" ]; then
-            echo ""
-            echo "📈 Current run statistics:"
-            cat "progress/CURRENT_RUN.txt"
-          fi
+          # Commit and push
+          git add data/
+          git commit -m "Update site structure: $(date +%Y-%m-%d)" || echo "No changes to commit"
+          git push || echo "Push failed - might need authentication setup"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
