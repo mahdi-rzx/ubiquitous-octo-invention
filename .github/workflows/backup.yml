@@ -1,0 +1,80 @@
+name: 🌐 Website Offline Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_url:
+        description: 'URL of the website to mirror'
+        required: true
+        default: 'https://chem.libretexts.org/'
+      depth:
+        description: 'Maximum recursion depth (1 = homepage only, 5 = deep)'
+        required: false
+        default: '3'
+      wait:
+        description: 'Delay between requests (seconds)'
+        required: false
+        default: '0.5'
+      output_name:
+        description: 'Name of the output ZIP (without .zip)'
+        required: false
+        default: 'offline-backup'
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # increase if site is large
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🛠️ Install wget
+        run: sudo apt-get update && sudo apt-get install -y wget
+
+      - name: 🌍 Mirror website with wget
+        run: |
+          # Create a directory for the download
+          mkdir -p website-mirror
+          
+          # Mirror the site (adjust options as needed)
+          wget \
+            --mirror \
+            --convert-links \
+            --adjust-extension \
+            --page-requisites \
+            --no-parent \
+            --wait=${{ github.event.inputs.wait }} \
+            --level=${{ github.event.inputs.depth }} \
+            --directory-prefix=./website-mirror \
+            --no-verbose \
+            --show-progress \
+            ${{ github.event.inputs.site_url }}
+          
+          echo "Mirror completed. Listing downloaded files:"
+          du -sh website-mirror/
+
+      - name: 📦 Create ZIP archive
+        run: |
+          ZIP_NAME="${{ github.event.inputs.output_name }}.zip"
+          cd website-mirror
+          zip -r ../"$ZIP_NAME" .
+          cd ..
+          echo "ZIP created: $ZIP_NAME ($(du -sh "$ZIP_NAME" | cut -f1))"
+
+      - name: 🚀 Commit and push ZIP to repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Move the ZIP to a permanent location (e.g., /backups)
+          mkdir -p backups
+          mv *.zip backups/
+          
+          git add backups/
+          git commit -m "📦 Add offline backup of ${{ github.event.inputs.site_url }}"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
