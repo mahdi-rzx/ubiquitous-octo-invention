@@ -1,43 +1,31 @@
-name: Archive Chem LibreTexts
+name: Archive Chem LibreTexts (30‑min cycles)
 
 on:
   schedule:
-    # Run every 6 hours – each run stops after 5.5 h to stay within GitHub’s limit
-    - cron: '0 */6 * * *'
-  workflow_dispatch:        # manual trigger
+    # Every 30 minutes – each run downloads for at most 30 min, then stops
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
 
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 360     # GitHub max (6 h). We'll let wget run for 5.5 h.
-    
+    timeout-minutes: 35          # extra 5 min safety, but wget itself stops at 30 min
+
     steps:
-      # ---------------------------------------------------------------
-      # 1. Checkout the whole repository (including existing archive/)
-      # ---------------------------------------------------------------
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0     # needed to push new commits
+          fetch-depth: 0
 
-      # ---------------------------------------------------------------
-      # 2. Configure git for the automated commits
-      # ---------------------------------------------------------------
       - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # ---------------------------------------------------------------
-      # 3. Mirror the site with 30‑minute checkpoints
-      # ---------------------------------------------------------------
-      - name: Mirror with frequent commits
-        id: mirror
-        # Prevent workflow failure if wget is killed by timeout
-        continue-on-error: true   
+      - name: Download for 30 minutes
+        # timeout kills wget after exactly 30 minutes
         run: |
-          # Start the mirror in the background, limited to 5.5 hours (19800 s)
-          timeout 19800 wget \
+          timeout 1800 wget \
             --mirror \
             --convert-links \
             --adjust-extension \
@@ -49,40 +37,17 @@ jobs:
             --limit-rate=200k \
             --reject='*.pdf,*.zip,*.mp4,*.mov,*.avi,*.exe' \
             --directory-prefix=archive \
+            --output-file=wget.log \
             --no-verbose \
-            https://chem.libretexts.org/ \
-            2>&1 | tee wget.log &
+            https://chem.libretexts.org/
 
-          WGET_PID=$!
-          echo "wget started with PID $WGET_PID"
-
-          # Commit every 30 minutes while wget is running
-          while kill -0 $WGET_PID 2>/dev/null; do
-            sleep 1800    # 30 minutes
-
-            # Commit whatever has been downloaded so far.
-            # Ignore errors if nothing changed.
-            git add archive/ wget.log 2>/dev/null
-            git commit -m "mirror checkpoint at $(date -u +'%Y-%m-%d %H:%M UTC')" || true
-          done
-
-          # wget has finished (or was killed by timeout). Wait and capture exit code.
-          wait $WGET_PID || WGET_EXIT=$?
-          echo "wget exit code: ${WGET_EXIT:-unknown}"
-
-          # Save the exit code for later steps
-          echo "wget_exit=${WGET_EXIT:-0}" >> $GITHUB_OUTPUT
-
-      # ---------------------------------------------------------------
-      # 4. Final commit & push – run even if mirror step was killed
-      # ---------------------------------------------------------------
-      - name: Commit and push final state
-        if: always()
+      - name: Commit and push progress
+        if: always()   # even if wget was killed by timeout
         run: |
           git add archive/ wget.log
           if git diff --cached --quiet; then
-            echo "No changes to commit after final sync."
+            echo "Nothing new to commit."
           else
-            git commit -m "Final mirror update ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git commit -m "30‑min cycle checkpoint ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git push
           fi
-          git push
