@@ -2,7 +2,6 @@ name: Archive Chem LibreTexts (30‑min cycles)
 
 on:
   schedule:
-    # Every 30 minutes – each run downloads for at most 30 min, then stops
     - cron: '*/30 * * * *'
   workflow_dispatch:
 
@@ -24,15 +23,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # ---------------------------------------------------------------
-      # Download for exactly 30 minutes
-      # ---------------------------------------------------------------
       - name: Download for 30 minutes
         id: download
-        continue-on-error: true        # timeout = 124 is NOT a failure
+        continue-on-error: true
         run: |
-          timeout 2400 wget \
-            --mirror \
+          timeout 180 wget \
+            --recursive \
+            --level=inf \
+            --no-clobber \
+            --no-remove-listing \
             --convert-links \
             --adjust-extension \
             --page-requisites \
@@ -48,13 +47,21 @@ jobs:
             https://chem.libretexts.org/
           echo "wget ended with exit code: $?"
 
-      # ---------------------------------------------------------------
-      # Always commit & push, even if wget was killed
-      # ---------------------------------------------------------------
+      - name: Save downloaded URL list
+        if: always()
+        run: |
+          grep -Po "URL:\Khttps?://[^ ]+" wget.log | sort -u > this_run_urls.txt
+          if [ -f downloaded_urls.txt ]; then
+            cat downloaded_urls.txt this_run_urls.txt | sort -u > tmp && mv tmp downloaded_urls.txt
+          else
+            mv this_run_urls.txt downloaded_urls.txt
+          fi
+          rm -f this_run_urls.txt
+
       - name: Commit and push progress
         if: always()
         run: |
-          git add archive/ wget.log
+          git add archive/ wget.log downloaded_urls.txt
           if git diff --cached --quiet; then
             echo "Nothing new to commit."
           else
