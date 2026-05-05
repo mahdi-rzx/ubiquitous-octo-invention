@@ -31,7 +31,7 @@ jobs:
         id: download
         continue-on-error: true        # timeout = 124 is NOT a failure
         run: |
-          timeout 300 wget \
+          timeout 2400 wget \
             --mirror \
             --convert-links \
             --adjust-extension \
